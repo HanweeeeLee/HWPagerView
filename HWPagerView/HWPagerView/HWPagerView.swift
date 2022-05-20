@@ -4,182 +4,280 @@
 //
 //  Created by hanwe lee on 2020/09/28.
 //
-
 import UIKit
 import SnapKit
+import Then
+import SwiftyTimer
+import RxCocoa
+import RxSwift
 
-protocol HWPagerViewDelegate:class {
-    
+
+class HWPagerViewCell: UICollectionViewCell {
 }
 
-extension HWPagerViewDelegate {
-    
+@objc protocol HWPagerViewDelegate: AnyObject {
+    @objc optional func pagerView(_ pagerView: HWPagerView, didSelectItemAt itemIndex: Int)
 }
 
-protocol HWPagerViewDatasource:class {
-    func hwPagerView(_ hwPagerView:HWPagerView) -> Int
-    func hwPagerView(_ hwPagerView:HWPagerView,cellForItemAt itemAt: UInt) -> HWPagerViewCell
-}
-
-extension HWPagerViewDatasource {
-    
+protocol HWPagerViewDatasource: AnyObject {
+    func hwPagerView(_ hwPagerView: HWPagerView) -> Int
+    func hwPagerView(_ hwPagerView: HWPagerView, cellForItemAt itemAt: UInt) -> HWPagerViewCell
 }
 
 class HWPagerView: UIView {
     
-    //MARK: property
+    // MARK: private UI property
     
-    weak var delegate:HWPagerViewDelegate?
-    weak var datasource:HWPagerViewDatasource?
+    lazy var collectionView = UICollectionView(frame: self.bounds, collectionViewLayout: UICollectionViewFlowLayout()).then {
+        $0.backgroundColor = self.backgroundColor
+        $0.delegate = self
+        $0.dataSource = self
+        $0.showsVerticalScrollIndicator = false
+        $0.showsHorizontalScrollIndicator = false
+        $0.isPagingEnabled = true // TODO: 나중에 estimate로 양 옆이 보이도록 업그레이드
+    }
     
-    //MARK: privateProperty
+    fileprivate lazy var pageControl = UIPageControl().then {
+        $0.numberOfPages = 0
+        $0.isUserInteractionEnabled = false
+    }
     
-    private lazy var collectionView:UICollectionView = UICollectionView(frame: self.bounds, collectionViewLayout: UICollectionViewFlowLayout.init())
-    private var numberOfItems:UInt = 0
-    var currentPage:UInt = 0
-    lazy var onceMoveWidth:CGFloat = self.bounds.width
+    // MARK: internal UI property
     
-    //MARK: lifeCycle
+    // MARK: property
     
-    override func awakeFromNib() {
-        super.awakeFromNib()
-        initUI()
+    weak var delegate: HWPagerViewDelegate?
+    weak var datasource: HWPagerViewDatasource?
+    
+    override var backgroundColor: UIColor? {
+        didSet {
+            self.collectionView.backgroundColor = self.backgroundColor
+        }
+    }
+    
+    var layout: UICollectionViewLayout = UICollectionViewLayout() {
+        didSet {
+            self.collectionView.collectionViewLayout = layout
+            self.onceMoveWidth = self.bounds.width
+        }
+    }
+    
+    var isAutoScrolling: Bool = false {
+        didSet {
+            if self.isAutoScrolling {
+                self.timer = makeTimer()
+                self.timer?.start(runLoop: .current, modes: .default)
+            } else {
+                self.timer?.invalidate()
+                self.timer = nil
+            }
+        }
+    }
+    
+    var autoScrollingTimeInterval: TimeInterval = 3.5
+    var isHiddenPageControl: Bool = false {
+        didSet {
+            if self.isHiddenPageControl {
+                self.pageControl.isHidden = true
+            } else {
+                self.pageControl.isHidden = false
+            }
+        }
+    }
+    
+    // MARK: private Property
+    
+    fileprivate var numberOfItems: UInt = 0
+    private var realCurrentPage: Int = 1
+    private(set) var currentPage: Int = 0 {
+        didSet {
+            self.pageControl.currentPage = self.currentPage
+        }
+    }
+    private lazy var onceMoveWidth: CGFloat = 0 // TODO: 나중에 의미 있게 만들자.
+    private var timer: Timer?
+    
+    // MARK: lifeCycle
+    
+    required init?(coder aDecoder: NSCoder) {
+        super.init(coder: aDecoder)
+        setup()
+    }
+    
+    init() {
+        super.init(frame: CGRect(x: 0, y: 0, width: 0, height: 0))
+        setup()
+    }
+    
+    // MARK: private func
+    
+    private func setup() {
+        self.collectionView.contentOffset = CGPoint(x: self.onceMoveWidth, y: 0)
         
+        self.addSubview(self.collectionView)
+        self.collectionView.snp.makeConstraints {
+            $0.edges.equalTo(self)
+        }
+        
+        self.addSubview(self.pageControl)
+        self.pageControl.snp.makeConstraints {
+            $0.bottom.equalTo(self.snp.bottom)
+            $0.centerX.equalTo(self.snp.centerX)
+            $0.width.equalTo(160)
+        }
     }
     
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        print("언제쯤이지")
-        testFunc()
+    private func makeTimer() -> Timer {
+        return Timer.scheduledTimer(withTimeInterval: self.autoScrollingTimeInterval, repeats: true, block: { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                self?.moveNextPage()
+            }
+        })
     }
     
-    //MARK: public func
+    //MARK: func
     
-    public func register(_ cellClass:UINib, _ forCellWithReuseIdentifier:String) {
+    func register(_ cellClass: UINib, _ forCellWithReuseIdentifier: String) {
         self.collectionView.register(cellClass, forCellWithReuseIdentifier: forCellWithReuseIdentifier)
     }
     
-    public func dequeueReusableCell(withReuseIdentifier:String,index at:UInt) -> HWPagerViewCell {
-        return self.collectionView.dequeueReusableCell(withReuseIdentifier: withReuseIdentifier, for: IndexPath(item: Int(at), section: 0)) as! HWPagerViewCell
+    func dequeueReusableCell(withReuseIdentifier: String, index at: UInt) -> HWPagerViewCell {
+        return self.collectionView.dequeueReusableCell(withReuseIdentifier: withReuseIdentifier, for: IndexPath(item: Int(at), section: 0)) as? HWPagerViewCell ?? HWPagerViewCell()
     }
     
-    func testFunc() {
-        self.collectionView.contentOffset = CGPoint(x: self.onceMoveWidth, y: 0)
+    func movePage(page: UInt, animated: Bool = true) {
+        self.collectionView.scrollToItem(at: IndexPath(item: Int(page+1), section: 0), at: .left, animated: animated)
     }
     
-    //MARK: private func
-    
-    func initUI() { //todo private
-        print("initUI")
-        self.collectionView.backgroundColor = .clear
-        self.addSubview(self.collectionView)
-        self.collectionView.snp.makeConstraints { (make) in
-            make.leading.equalTo(self.snp.leading).offset(0)
-            make.trailing.equalTo(self.snp.trailing).offset(0)
-            make.top.equalTo(self.snp.top).offset(0)
-            make.bottom.equalTo(self.snp.bottom).offset(0)
-        }
-        self.collectionView.delegate = self
-        self.collectionView.dataSource = self
-        self.collectionView.isPagingEnabled = true
-        
-//        self.collectionView.decelerationRate =
-//        self.collectionView.decelerationRate.rawValue = 0
-        
-        let layout = UICollectionViewFlowLayout()
-        layout.scrollDirection = .horizontal
-        layout.minimumLineSpacing = 0
-        layout.minimumInteritemSpacing = 0
-//        layout.sectionInset = UIEdgeInsets(top: 0, left: self.onceMoveWidth, bottom: 0, right: 0)
-        self.collectionView.collectionViewLayout = layout
+    func moveNextPage(animated: Bool = true) {
+        self.collectionView.scrollToItem(at: IndexPath(item: Int(self.realCurrentPage + 1), section: 0), at: .left, animated: animated)
     }
-    
-    func movePage(page:UInt) {
-        self.collectionView.scrollToItem(at: IndexPath(item: Int(page), section: 0), at: .left, animated: true)
-    }
-    
-    func scrollViewWillEndDragging (scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
-//        targetContentOffset.memory = scrollView.contentOffset
-        print("언제호출?")
-    }
-    func scrollViewWillBeginDecelerating(scrollView: UIScrollView) {
-        print("호출?")
-        scrollView.setContentOffset(scrollView.contentOffset, animated: true)
-    }
-    
-    //MARK: action
-    
     
 }
 
-extension HWPagerView:UICollectionViewDelegate,UICollectionViewDataSource,UICollectionViewDelegateFlowLayout {
-    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        guard let ds = self.datasource else { return 0 }
-        self.numberOfItems = UInt(ds.hwPagerView(self))
-        return Int(self.numberOfItems + 2)
-//        return Int(self.numberOfItems)
+extension HWPagerView: UICollectionViewDelegate {
+    
+    func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
+        let page = Int(collectionView.contentOffset.x/self.onceMoveWidth)
+        self.realCurrentPage = page
+        self.currentPage = page - 1
+        if realCurrentPage == 0 {
+            self.collectionView.contentOffset = CGPoint(x: collectionView.frame.size.width * CGFloat(numberOfItems), y: collectionView.contentOffset.y)
+            self.currentPage = Int(self.numberOfItems) - 1
+            self.realCurrentPage = Int(self.numberOfItems)
+        } else if realCurrentPage == numberOfItems + 1 {
+            self.collectionView.contentOffset = CGPoint(x: self.onceMoveWidth, y: collectionView.contentOffset.y)
+            self.currentPage = 0
+            self.realCurrentPage = 1
+        }
     }
     
-    func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-        var cell = UICollectionViewCell()
-        if indexPath.item == 0 {
-            cell = self.datasource!.hwPagerView(self, cellForItemAt: UInt(self.numberOfItems - 1))
-        }
-        else if indexPath.item == self.numberOfItems + 1 {
-            cell = self.datasource!.hwPagerView(self, cellForItemAt: UInt(0))
-        }
-        else {
-            cell = self.datasource!.hwPagerView(self, cellForItemAt: UInt(indexPath.item - 1 ))
-        }
-//        cell = self.datasource!.hwPagerView(self, cellForItemAt: UInt(indexPath.item))
-        return cell
-    }
-    
-    func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout, sizeForItemAt indexPath: IndexPath) -> CGSize {// 화면회전 고려는 나중에
-        return CGSize(width: self.bounds.width, height: self.bounds.height)
+    func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+        self.delegate?.pagerView?(self, didSelectItemAt: self.currentPage)
     }
     
     func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
-        print("drag start")
+        if self.isAutoScrolling {
+            self.timer?.invalidate()
+            self.timer = nil
+        }
     }
     
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        print("endDrag")
-//        self.currentPage = UInt(scrollView.contentOffset.x/self.onceMoveWidth)
-//        if (scrollView.contentOffset.x.truncatingRemainder(dividingBy: self.onceMoveWidth)) > (self.onceMoveWidth/2) {
-//            self.currentPage += 1
-//        }
-//        movePage(page: self.currentPage)
-    }
-    
-    func scrollViewDidScroll(_ scrollView: UIScrollView) {
-//        print("scroll x:\(scrollView.contentOffset.x)")
-//        print("currentPage:\(UInt(scrollView.contentOffset.x/self.onceMoveWidth))")
+        if self.isAutoScrolling {
+            self.timer = makeTimer()
+        }
         
     }
     
-    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
-//        let currentPage:Int = Int(scrollView.contentOffset.x / scrollView.frame.size.width)
-        let page = UInt(scrollView.contentOffset.x/self.onceMoveWidth)
-        self.currentPage = page
-//        if page + 1 > self.currentPage {
-//            self.currentPage += 1
-////            movePage(page: self.currentPage)
-//        }
-//
-//        if page > 0 {
-//            if page - 1 < self.currentPage {
-//                self.currentPage -= 1
-////                movePage(page: self.currentPage)
-//            }
-//        }
-        print("currentPage:\(self.currentPage)")
-        if currentPage == 0 {
-            self.collectionView.contentOffset = CGPoint(x: scrollView.frame.size.width * CGFloat(numberOfItems), y: scrollView.contentOffset.y)
+}
+
+
+extension HWPagerView: UICollectionViewDataSource {
+    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+        guard let ds = self.datasource else { return 0 }
+        self.numberOfItems = UInt(ds.hwPagerView(self))
+        self.pageControl.numberOfPages = Int(numberOfItems)
+        return Int(self.numberOfItems + 2)
+    }
+    
+    func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+        guard let ds = self.datasource else { return UICollectionViewCell() }
+        var cell = UICollectionViewCell()
+        if indexPath.item == 0 {
+            cell = ds.hwPagerView(self, cellForItemAt: UInt(self.numberOfItems - 1))
+        } else if indexPath.item == self.numberOfItems + 1 {
+            cell = ds.hwPagerView(self, cellForItemAt: UInt(0))
+        } else {
+            cell = ds.hwPagerView(self, cellForItemAt: UInt(indexPath.item - 1))
         }
-        else if currentPage == numberOfItems+1 {
-            print("안들어오지않나")
-            self.collectionView.contentOffset = CGPoint(x: self.onceMoveWidth, y: scrollView.contentOffset.y)
+        return cell
+    }
+    
+}
+
+class HWPagerViewDelegateProxy: DelegateProxy<HWPagerView, HWPagerViewDelegate>, DelegateProxyType, HWPagerViewDelegate {
+
+    static func registerKnownImplementations() {
+        self.register { (viewController) -> HWPagerViewDelegateProxy in
+            HWPagerViewDelegateProxy(parentObject: viewController, delegateProxy: self)
+        }
+    }
+
+    static func currentDelegate(for object: HWPagerView) -> HWPagerViewDelegate? {
+        return object.delegate
+    }
+
+    static func setCurrentDelegate(_ delegate: HWPagerViewDelegate?, to object: HWPagerView) {
+        object.delegate = delegate
+    }
+
+}
+
+extension Reactive where Base == HWPagerView {
+
+    var delegate: DelegateProxy<HWPagerView, HWPagerViewDelegate> {
+        return HWPagerViewDelegateProxy.proxy(for: self.base)
+    }
+
+    var didSelectedItem: Observable<Int> {
+        return delegate.methodInvoked(#selector(HWPagerViewDelegate.pagerView(_:didSelectItemAt:)))
+            .map { param in
+                return param[1] as? Int ?? 0
+            }
+    }
+    
+    typealias ConfigureCell<S: Sequence, Cell> = (Int, S.Iterator.Element, Cell) -> Void
+    
+    func items<S: Sequence, Cell: HWPagerViewCell, O: ObservableType>(
+        cellIdentifier: String,
+        cellType: Cell.Type = Cell.self
+    ) -> (_ source: O) -> (_ configureCell: @escaping ConfigureCell<S, Cell>) -> Disposable
+    where O.Element == S {
+        base.collectionView.dataSource = nil
+        return { source in
+            let source = source.observe(on: ConcurrentDispatchQueueScheduler(queue: .global()))
+                .map { sequence -> [S.Element] in
+                    let items: [S.Element] = {
+                        var items = Array(sequence)
+                        if items.count > 0 {
+                            let lastItem = items.last!
+                            let firstItme = items.first!
+                            items.insert(lastItem, at: 0)
+                            items.append(firstItme)
+                        }
+                        return items
+                    }()
+                    base.numberOfItems = UInt(items.count - 2)
+                    DispatchQueue.main.async {
+                        base.pageControl.numberOfPages = items.count - 2
+                    }
+                    return items
+                }
+            return self.base.collectionView.rx.items(
+                cellIdentifier: cellIdentifier,
+                cellType: cellType
+            )(source)
         }
     }
     
